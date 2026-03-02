@@ -9,7 +9,7 @@ import vlc
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider, QSpinBox, QVBoxLayout,
-    QColorDialog, QFontDialog, QMessageBox,
+    QColorDialog, QFontDialog, QMessageBox, QDoubleSpinBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui  import QColor, QFont, QKeySequence
@@ -20,12 +20,13 @@ from config.settings import DEFAULT_CONFIG
 class EqualizerDialog(QDialog):
     """10-band VLC equalizer with preset support."""
 
-    def __init__(self, media_player, parent=None) -> None:
+    def __init__(self, media_player, eq_state: dict | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Equalizer")
         self.setMinimumWidth(600)
         self._player    = media_player
         self._equalizer = vlc.libvlc_audio_equalizer_new()
+        self._eq_state  = eq_state or {}
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -36,11 +37,14 @@ class EqualizerDialog(QDialog):
         row.addWidget(QLabel("Preset:"))
         self._combo_presets = QComboBox()
         n = vlc.libvlc_audio_equalizer_get_preset_count()
+        # Block signals while populating so currentIndexChanged does not fire
+        self._combo_presets.blockSignals(True)
         for i in range(n):
             name = vlc.libvlc_audio_equalizer_get_preset_name(i)
             if isinstance(name, bytes):
                 name = name.decode()
             self._combo_presets.addItem(name)
+        self._combo_presets.blockSignals(False)
         self._combo_presets.currentIndexChanged.connect(self._apply_preset)
         row.addWidget(self._combo_presets)
         row.addStretch()
@@ -99,6 +103,24 @@ class EqualizerDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        # Restore previously saved state (if any) into sliders + equalizer object
+        if self._eq_state:
+            preamp = self._eq_state.get("preamp", 0.0)
+            self._slider_preamp.blockSignals(True)
+            self._slider_preamp.setValue(int(preamp * 10))
+            self._lbl_preamp.setText(f"{preamp:.1f} dB")
+            vlc.libvlc_audio_equalizer_set_preamp(self._equalizer, preamp)
+            self._slider_preamp.blockSignals(False)
+            for i, sl in enumerate(self._sliders):
+                amp = self._eq_state.get("bands", [0.0] * len(self._sliders))[i] if i < len(self._eq_state.get("bands", [])) else 0.0
+                sl.blockSignals(True)
+                sl.setValue(int(amp * 10))
+                self._lbl_vals[i].setText(f"{amp:.1f}")
+                vlc.libvlc_audio_equalizer_set_amp_at_index(self._equalizer, amp, i)
+                sl.blockSignals(False)
+
+        # Attach equalizer immediately so it is active from the moment the
+        # dialog opens, even before the user moves any slider.
         vlc.libvlc_media_player_set_equalizer(self._player, self._equalizer)
 
     # ------------------------------------------------------------------
@@ -117,16 +139,51 @@ class EqualizerDialog(QDialog):
 
     def _apply_preset(self, index: int) -> None:
         eq = vlc.libvlc_audio_equalizer_new_from_preset(index)
+        # Block slider signals while loading preset values to avoid redundant
+        # set_equalizer calls; one final call is made after all values are set.
+        self._slider_preamp.blockSignals(True)
+        for sl in self._sliders:
+            sl.blockSignals(True)
         self._slider_preamp.setValue(int(vlc.libvlc_audio_equalizer_get_preamp(eq) * 10))
+        preamp_db = vlc.libvlc_audio_equalizer_get_preamp(eq)
+        self._lbl_preamp.setText(f"{preamp_db:.1f} dB")
+        vlc.libvlc_audio_equalizer_set_preamp(self._equalizer, preamp_db)
         for i, sl in enumerate(self._sliders):
-            sl.setValue(int(vlc.libvlc_audio_equalizer_get_amp_at_index(eq, i) * 10))
+            amp = vlc.libvlc_audio_equalizer_get_amp_at_index(eq, i)
+            sl.setValue(int(amp * 10))
+            self._lbl_vals[i].setText(f"{amp:.1f}")
+            vlc.libvlc_audio_equalizer_set_amp_at_index(self._equalizer, amp, i)
+        self._slider_preamp.blockSignals(False)
+        for sl in self._sliders:
+            sl.blockSignals(False)
         vlc.libvlc_audio_equalizer_release(eq)
         vlc.libvlc_media_player_set_equalizer(self._player, self._equalizer)
 
+    @property
+    def eq_state(self) -> dict:
+        """Return current equalizer state for persistence."""
+        n = len(self._sliders)
+        return {
+            "preamp": self._slider_preamp.value() / 10.0,
+            "bands":  [self._sliders[i].value() / 10.0 for i in range(n)],
+        }
+
     def _reset(self) -> None:
-        self._slider_preamp.setValue(0)
+        # Block signals, zero everything in the equalizer object, then attach once.
+        self._slider_preamp.blockSignals(True)
         for sl in self._sliders:
+            sl.blockSignals(True)
+        self._slider_preamp.setValue(0)
+        self._lbl_preamp.setText("0.0 dB")
+        vlc.libvlc_audio_equalizer_set_preamp(self._equalizer, 0.0)
+        for i, sl in enumerate(self._sliders):
             sl.setValue(0)
+            self._lbl_vals[i].setText("0.0")
+            vlc.libvlc_audio_equalizer_set_amp_at_index(self._equalizer, 0.0, i)
+        self._slider_preamp.blockSignals(False)
+        for sl in self._sliders:
+            sl.blockSignals(False)
+        vlc.libvlc_media_player_set_equalizer(self._player, self._equalizer)
 
 
 # ---------------------------------------------------------------------------
@@ -186,19 +243,23 @@ class SettingsDialog(QDialog):
         self._spin_bars.setSuffix(" bars")
         layout.addRow("FFT bars:", self._spin_bars)
 
-        # Spinx flux history - number of points
+        # Flux history
         self._spin_flux = QSpinBox()
         self._spin_flux.setRange(100, 5000)
         self._spin_flux.setValue(self._config.get("flux_history", 2000))
         self._spin_flux.setSuffix(" points")
         layout.addRow("Flux history:", self._spin_flux)
 
-        # Spin collumns number
-        self._spin_cols = QSpinBox()
-        self._spin_cols.setRange(50, 1000)
-        self._spin_cols.setValue(self._config.get("max_cols", 200))
-        self._spin_cols.setSuffix(" columns")
-        layout.addRow("Spectrogram width:", self._spin_cols)
+        # Spectrogram time resolution
+        self._spin_spectrogram_res = QDoubleSpinBox()
+        self._spin_spectrogram_res.setRange(0.1, 5.0)
+        self._spin_spectrogram_res.setSingleStep(0.1)
+        self._spin_spectrogram_res.setDecimals(1)
+        fps    = self._config.get("fps", 60)
+        frames = self._config.get("spectrogram_resolution", 15)
+        self._spin_spectrogram_res.setValue(round(frames / fps, 1))
+        self._spin_spectrogram_res.setSuffix("s / bin")
+        layout.addRow("Spectrogram resolution:", self._spin_spectrogram_res)
 
         # Shortcuts
         self._shortcut_fields: dict[str, QLineEdit] = {}
@@ -209,6 +270,10 @@ class SettingsDialog(QDialog):
             field.setFixedHeight(28)
             self._shortcut_fields[key] = field
             layout.addRow(f"{label}:", field)
+
+        btn_reset_defaults = QPushButton("Reset to defaults")
+        btn_reset_defaults.clicked.connect(self._reset_defaults)
+        layout.addRow(btn_reset_defaults)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -250,16 +315,38 @@ class SettingsDialog(QDialog):
             self._config["font_size"]   = font.pointSize()
             self._btn_font.setText(f"{font.family()} {font.pointSize()}pt")
 
+    def _reset_defaults(self) -> None:
+        self._config = DEFAULT_CONFIG.copy()
+        self._refresh_color_btn(self._btn_primary,    self._config["primary_color"])
+        self._refresh_color_btn(self._btn_accent,     self._config["accent_color"])
+        self._refresh_color_btn(self._btn_background, self._config["background_color"])
+        self._refresh_color_btn(self._btn_selection,  self._config["selection_color"])
+        self._spin_fps.setValue(self._config["fps"])
+        self._spin_bars.setValue(self._config["bar_count"])
+        self._spin_flux.setValue(self._config.get("flux_history", 2000))
+        fam    = self._config.get("font_family", "Cantarell")
+        sz     = self._config.get("font_size", 13)
+        fps    = self._config.get("fps", 60)
+        frames = self._config.get("spectrogram_resolution", 15)
+        self._spin_spectrogram_res.setValue(round(frames / fps, 1))
+        self._btn_font.setText(f"{fam} {sz}pt")
+        shortcuts = self._config.get("shortcuts", DEFAULT_CONFIG["shortcuts"])
+        for key, field in self._shortcut_fields.items():
+            field.setText(shortcuts.get(key, ""))
+
     def _on_accept(self) -> None:
         shortcuts = {k: f.text() for k, f in self._shortcut_fields.items()}
         if len(set(shortcuts.values())) != len(shortcuts):
             QMessageBox.warning(self, "Error", "Two actions share the same shortcut.")
             return
-        self._config["fps"]       = self._spin_fps.value()
-        self._config["bar_count"] = self._spin_bars.value()
+        self._config["fps"]          = self._spin_fps.value()
+        self._config["bar_count"]    = self._spin_bars.value()
         self._config["flux_history"] = self._spin_flux.value()
-        self._config["max_cols"] = self._spin_cols.value()
-        self._config["shortcuts"] = shortcuts
+        self._config["shortcuts"]    = shortcuts
+        # fps must be committed first so the frames-per-bin calculation is correct
+        self._config["spectrogram_resolution"] = max(1, round(
+            self._spin_spectrogram_res.value() * self._config["fps"]
+        ))
         self.accept()
 
     # ------------------------------------------------------------------

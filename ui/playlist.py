@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem
+from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem, QMenu
 from PyQt6.QtCore    import Qt
 
 class PlaylistItem(QTreeWidgetItem):
@@ -45,11 +45,13 @@ class PlaylistWidget(QTreeWidget):
         self.setColumnCount(len(self.COLUMNS))
         self.setHeaderLabels(self.COLUMNS)
         self.header().setSortIndicatorShown(True)
-        self.header().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-        self.setSortingEnabled(True)
+        self.header().sectionClicked.connect(self._on_header_clicked)
+        self.setSortingEnabled(False)
         self.setRootIsDecorated(False)
         self.setAlternatingRowColors(False)
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
 
         # O(1) duplicate check: maps absolute_path -> QTreeWidgetItem
         self._path_index: dict[str, PlaylistItem] = {}
@@ -60,6 +62,29 @@ class PlaylistWidget(QTreeWidget):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _on_context_menu(self, position) -> None:
+        items = self.selectedItems()
+        if not items:
+            return
+        menu = QMenu(self)
+        action = menu.addAction(f"Remove {len(items)} track(s)")
+        action.triggered.connect(self.remove_selected)
+        menu.exec(self.viewport().mapToGlobal(position))
+
+    def _on_header_clicked(self, col: int) -> None:
+        """Sort on click, toggle direction on second click."""
+        if not self.isSortingEnabled():
+            self.setSortingEnabled(True)
+        current = self.header().sortIndicatorOrder()
+        order = (Qt.SortOrder.DescendingOrder 
+                if current == Qt.SortOrder.AscendingOrder 
+                else Qt.SortOrder.AscendingOrder)
+        self.sortItems(col, order)
+        self.header().setSortIndicator(col, order)
+
+    def item_by_path(self, path: str) -> Optional[QTreeWidgetItem]:
+        """Return the item for *path*, or None if not in playlist."""
+        return self._path_index.get(path)
 
     def add_track(self,path: str,track: str,artist: str,album: str,title: str,duration: str,) -> Optional[QTreeWidgetItem]:
         if path in self._path_index:

@@ -144,13 +144,48 @@ class SampleLoader:
         self._thread = threading.Thread(target=self._run, args=(path,), daemon=True)
         self._thread.start()
 
+    FALLBACK_RATE = 44_100
+    FALLBACK_CH   = 2
+
     def _run(self, path: str) -> None:
+        # Primary: soundfile
         try:
             samples, rate = sf.read(path, dtype="float32", always_2d=True)
             self.samples     = samples
             self.sample_rate = rate
+            return
         except Exception as e:
-            print(f"[SampleLoader] Cannot read {path}: {e}")
+            print(f"[SampleLoader] soundfile failed ({e}), trying ffmpeg...")
+        # Fallback: ffmpeg -> raw f32le PCM
+        self._run_ffmpeg(path)
+
+    def _run_ffmpeg(self, path: str) -> None:
+        import subprocess, shutil
+        ffmpeg = shutil.which("ffmpeg") or shutil.which("avconv")
+        if ffmpeg is None:
+            print("[SampleLoader] ffmpeg not found; visualisations disabled.")
+            return
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-i", path,
+            "-f", "f32le", "-acodec", "pcm_f32le",
+            "-ar", str(self.FALLBACK_RATE),
+            "-ac", str(self.FALLBACK_CH),
+            "pipe:1",
+        ]
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=120)
+            raw = result.stdout
+            if not raw:
+                print(f"[SampleLoader] ffmpeg no output: {result.stderr.decode()[:200]}")
+                return
+            flat    = np.frombuffer(raw, dtype=np.float32)
+            samples = flat.reshape(-1, self.FALLBACK_CH)
+            self.samples     = samples
+            self.sample_rate = self.FALLBACK_RATE
+        except Exception as e:
+            print(f"[SampleLoader] ffmpeg fallback failed: {e}")
 
 
 # ---------------------------------------------------------------------------
