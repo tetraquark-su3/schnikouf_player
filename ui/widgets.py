@@ -14,6 +14,20 @@ class ShortcutField(QLineEdit):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setPlaceholderText("Click then press shortcut…")
+        self.setStyleSheet("""
+            QLineEdit {
+                border: 2px solid #444466;
+                border-radius: 4px;
+                padding: 2px 6px;
+                background: #1a1a2e;
+                color: #e0e0f0;
+            }
+            QLineEdit:focus {
+                border: 2px solid #e94560;
+                background: #2a1a3e;
+                color: #ffffff;
+            }
+        """)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()

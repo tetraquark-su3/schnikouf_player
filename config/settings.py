@@ -32,10 +32,11 @@ DEFAULT_CONFIG: dict = {
     "accent_color":     "#a8c0ff",
     "background_color": "#1a1a2e",
     "selection_color":  "#c73652",
-    "fps":              30,
+    "fps":              60,
     "bar_count":        64,
-    "flux_history":     2000,
+    "flux_history":     1000,
     "max_cols":         200,
+    "spectrogram_resolution": 15,  # frames per bin (15 @ 30fps = 0.5s)
     "font_family":      "Cantarell",
     "font_size":        13,
     "shortcuts": {

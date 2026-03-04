@@ -13,16 +13,14 @@ import re
 import random
 import numpy as np
 import vlc
-from PyQt6.QtCore    import QDir, QModelIndex, Qt, QTimer, QSize
-from PyQt6.QtGui     import QColor, QFont, QKeySequence, QPixmap, QShortcut, QIcon, QPainter
+from PyQt6.QtCore    import QDir, QModelIndex, Qt, QTimer, QSize, pyqtSlot, pyqtSignal
+from PyQt6.QtGui     import QColor, QFont, QKeySequence, QPixmap, QShortcut, QIcon, QPainter, QFileSystemModel
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout,
     QLabel, QMainWindow, QMessageBox, QSplitter, QTabWidget,
     QTextEdit, QTreeView, QVBoxLayout, QWidget, QPushButton, 
     QLineEdit
 )
-from PyQt6.QtGui import QFileSystemModel
-
 from audio.engine     import (
     SampleLoader, build_detail_text, compute_fft_frame, read_album_art, read_metadata,
 )
@@ -57,7 +55,7 @@ ICON_MAP = {
 
 }
 
-BASE_DIR  = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR  = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ASSETS_DIR = os.path.join(BASE_DIR, "assets")
 
 def _natural_key(s: str):
@@ -65,6 +63,7 @@ def _natural_key(s: str):
 
 class MainWindow(QMainWindow):
     """Quark Audio Player — main application window."""
+    _socket_file_received = pyqtSignal(str)  # add this line near the top of the class
 
     # ------------------------------------------------------------------
     # Construction
@@ -73,7 +72,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._vlc = vlc.Instance("--reset-plugins-cache")
-        self.setWindowTitle("Quark Audio Player v1.0")
+        self.setWindowTitle("Quark Audio Player v0.3")
         app_icon_path = os.path.join(ASSETS_DIR, "icon_app.png")
         if os.path.exists(app_icon_path):
             self.setWindowIcon(QIcon(app_icon_path))
@@ -108,6 +107,8 @@ class MainWindow(QMainWindow):
         self._apply_config()
         self._apply_shortcuts()
         self._load_playlist()
+
+        self._socket_file_received.connect(self._open_from_socket)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -151,20 +152,31 @@ class MainWindow(QMainWindow):
 
         self._root_combo = QComboBox()
         self._root_combo.addItem("Home", QDir.homePath())
-        self._root_combo.addItem("Root /", "/")
-        user = os.environ.get("USER", "")
+
         drive_icon = self.style().standardIcon(
-        self.style().StandardPixmap.SP_DriveHDIcon
+            self.style().StandardPixmap.SP_DriveHDIcon
         )
-        for base in [f"/run/media/{user}", "/mnt"]:
-            if os.path.isdir(base):
-                for entry in os.listdir(base):
-                    path = os.path.join(base, entry)
-                    if os.path.ismount(path):
-                        self._root_combo.addItem(drive_icon, entry, path)
+
+        if sys.platform == "win32":
+            # Énumère toutes les lettres de lecteur montées (C:\, D:\, etc.)
+            import string
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:\\"
+                if os.path.exists(drive):
+                    self._root_combo.addItem(drive_icon, drive, drive)
+        else:
+            # Linux : points de montage classiques
+            user = os.environ.get("USER", "")
+            self._root_combo.addItem("Root /", "/")
+            for base in [f"/run/media/{user}", "/mnt"]:
+                if os.path.isdir(base):
+                    for entry in os.listdir(base):
+                        path = os.path.join(base, entry)
+                        if os.path.ismount(path):
+                            self._root_combo.addItem(drive_icon, entry, path)
+
         self._root_combo.currentIndexChanged.connect(self._change_root)
         left_layout.addWidget(self._root_combo)
-
         self._fs_model = QFileSystemModel()
         self._fs_model.setRootPath(QDir.homePath())
         self._file_tree = QTreeView()
@@ -273,8 +285,8 @@ class MainWindow(QMainWindow):
         self._progress.setFixedHeight(24)
         self._time_label = QLabel("0:00 / 0:00")
         self._time_label.setObjectName("timeLabel")
-        self._time_label.setFixedWidth(90)
-        self._time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._time_label.setFixedWidth(110)
+        self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         prog_row.addWidget(self._progress)
         prog_row.addWidget(self._time_label)
         ctrl_col.addLayout(prog_row)
@@ -297,12 +309,17 @@ class MainWindow(QMainWindow):
         self._volume.setRange(0, 100)
         self._volume.setValue(80)
         self._volume.setFixedWidth(100)
-        self._volume.valueChanged.connect(lambda v: self._player.audio_set_volume(v))
+        self._volume_label = QLabel("80%")
+        self._volume_label.setObjectName("timeLabel")
+        self._volume_label.setFixedWidth(36)
+        self._volume_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._volume.valueChanged.connect(self._on_volume_changed)
         self._player.audio_set_volume(80)
 
         self._btn_mute = self._ctrl_btn("Volume", self._toggle_mute, checkable=True)
         btn_row.addWidget(self._btn_mute)
         btn_row.addWidget(self._volume)
+        btn_row.addWidget(self._volume_label)
 
         self._btn_shuffle = self._ctrl_btn("Shuffle", self._toggle_shuffle, checkable=True)
         self._btn_repeat  = self._ctrl_btn("Repeat",  self._toggle_repeat,  checkable=True)
@@ -389,6 +406,22 @@ class MainWindow(QMainWindow):
             btn.setIconSize(QSize(22, 22))
         else:
             btn.setText(label)   # fallback
+        tooltip_map = {
+            "Settings": "Settings",
+            "|<":       "Previous track",
+            ">":        "Play",
+            "||":       "Pause",
+            "[]":       "Stop",
+            ">|":       "Next track",
+            "Shuffle":  "Shuffle",
+            "Repeat":   "Repeat",
+            "Save":     "Save playlist",
+            "Load":     "Load playlist",
+            "EQ":       "Equalizer",
+            "Volume":   "Mute / Unmute",
+            "Muted":    "Mute / Unmute",
+        }
+        btn.setToolTip(tooltip_map.get(label, label))
         return btn
 
     # ------------------------------------------------------------------
@@ -399,7 +432,7 @@ class MainWindow(QMainWindow):
         fps = self._config["fps"]
         self._timer_fft.setInterval(1_000 // fps)
         self._flux.set_max_points(self._config.get("flux_history", 2000))
-        self._spectrogram.set_max_cols(self._config.get("max_cols", 200))
+        self._spectrogram.set_frames_per_bin(self._config.get("spectrogram_resolution", 15))
         cp = self._config["primary_color"]
         ca = self._config["accent_color"]
         for w in [self._spectrum, self._oscilloscope, self._lissajous,
@@ -437,6 +470,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # File browser
     # ------------------------------------------------------------------
+    @pyqtSlot(str)
+    def _open_from_socket(self, path: str) -> None:
+        self.raise_()
+        self.activateWindow()
+        item = self._playlist.item_by_path(path)
+        if item is None:
+            self._add_file(path)
+            item = self._playlist.topLevelItem(
+                self._playlist.topLevelItemCount() - 1
+            )
+        if item is not None and not self._player.is_playing():
+            self._play_item(item)
 
     def _change_root(self, index: int) -> None:
         path = self._root_combo.itemData(index)
@@ -450,16 +495,46 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Added: {os.path.basename(path)}")
 
     def _on_file_context_menu(self, position) -> None:
-        index = self._file_tree.indexAt(position)
-        if not index.isValid():
-            return
-        path = self._fs_model.filePath(index)
-        if os.path.isdir(path):
-            from PyQt6.QtWidgets import QMenu
-            menu = QMenu(self)
-            action = menu.addAction("Add folder to playlist")
-            action.triggered.connect(lambda: self._add_folder(path))
+        from PyQt6.QtWidgets import QMenu
+        indexes = self._file_tree.selectedIndexes()
+        if not indexes:
+            index = self._file_tree.indexAt(position)
+            if not index.isValid():
+                return
+            indexes = [index]
+
+        # Collect unique paths (selectedIndexes may repeat per column)
+        seen = set()
+        paths = []
+        for idx in indexes:
+            p = self._fs_model.filePath(idx)
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+
+        audio_paths = [p for p in paths if os.path.isfile(p) and is_audio(p)]
+        dir_paths   = [p for p in paths if os.path.isdir(p)]
+
+        menu = QMenu(self)
+        if audio_paths:
+            n = len(audio_paths)
+            label = f"Add {n} track{'s' if n > 1 else ''} to playlist"
+            action = menu.addAction(label)
+            action.triggered.connect(lambda: self._add_files(audio_paths))
+        if dir_paths:
+            for d in dir_paths:
+                action = menu.addAction(f'Add folder "{os.path.basename(d)}" to playlist')
+                action.triggered.connect(lambda checked=False, folder=d: self._add_folder(folder))
+        if not menu.isEmpty():
             menu.exec(self._file_tree.viewport().mapToGlobal(position))
+
+    def _add_files(self, paths: list) -> None:
+        count = 0
+        for path in paths:
+            self._add_file(path)
+            count += 1
+        if count:
+            self.statusBar().showMessage(f"Added {count} track{'s' if count > 1 else ''} to playlist.")
 
     def _add_folder(self, folder: str) -> None:
         count = 0
@@ -648,6 +723,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("VLC refused to play this file.")
             return
 
+        # Re-attach equalizer after every new media so EQ survives track changes.
+        # Build a fresh equalizer from saved state each time (set_media resets it).
+        eq_state = self._config.get("eq_state", {})
+        if eq_state:
+            eq = vlc.libvlc_audio_equalizer_new()
+            vlc.libvlc_audio_equalizer_set_preamp(eq, eq_state.get("preamp", 0.0))
+            for i, amp in enumerate(eq_state.get("bands", [])):
+                vlc.libvlc_audio_equalizer_set_amp_at_index(eq, amp, i)
+            vlc.libvlc_media_player_set_equalizer(self._player, eq)
+            vlc.libvlc_audio_equalizer_release(eq)
+
         self._current_track = self._playlist.indexOfTopLevelItem(item)
         self._playlist.setCurrentItem(item)
 
@@ -681,6 +767,10 @@ class MainWindow(QMainWindow):
                 self._set_play_icon(True)
                 self._timer_progress.start()
                 self._timer_fft.start()
+
+    def _on_volume_changed(self, v: int) -> None:
+        self._player.audio_set_volume(v)
+        self._volume_label.setText(f"{v}%")
 
     def _toggle_mute(self) -> None:
         if self._btn_mute.isChecked():
@@ -721,13 +811,20 @@ class MainWindow(QMainWindow):
         if item:
             self._play_item(item)
         else:
+            self._player.stop()
             self._timer_fft.stop()
             self._timer_progress.stop()
             self._set_play_icon(False)
+            self._progress.setValue(0)
+            self._time_label.setText("0:00 / 0:00")
             self.statusBar().showMessage("End of playlist.")
 
     def _prev_track(self) -> None:
-        if self._current_track is None or self._current_track == 0:
+        if self._current_track is None:
+            return
+        if self._current_track == 0:
+            # Restart current track from beginning
+            self._player.set_position(0.0)
             return
         self._play_item(self._playlist.item_at_row(self._current_track - 1))
 
@@ -784,16 +881,24 @@ class MainWindow(QMainWindow):
         self._lissajous.set_samples(frame["left"], frame["right"])
         self._flux.update_spectrum(frame["bars"])
 
-        lv = float(np.abs(np.array(frame["left"])).mean())
-        rv = float(np.abs(np.array(frame["right"])).mean())
-        self._vumeter.set_levels(min(1.0, lv), min(1.0, rv))
+        lv = float(np.sqrt(np.mean(np.square(np.array(frame["left"])))))
+        rv = float(np.sqrt(np.mean(np.square(np.array(frame["right"])))))
+        # Scale RMS: 0.3 RMS (loud/clipped material) → 1.0, with headroom below
+        # Typical well-mastered loud track peaks ~0.25–0.35 RMS; quiet ~0.03–0.08
+        scale = 2.0
+        self._vumeter.set_levels(min(1.0, lv * scale), min(1.0, rv * scale))
 
     # ------------------------------------------------------------------
     # Equalizer
     # ------------------------------------------------------------------
 
     def _open_equalizer(self) -> None:
-        EqualizerDialog(self._player, self).exec()
+        eq_state = self._config.get("eq_state", {})
+        dlg = EqualizerDialog(self._player, eq_state, self)
+        dlg.exec()
+        # Always save state (even on Close), so it survives re-open and app restart
+        self._config["eq_state"] = dlg.eq_state
+        save_config(self._config)
 
     # ------------------------------------------------------------------
     # VLC error callback
