@@ -241,9 +241,21 @@ class SettingsDialog(QDialog):
         self._btn_font.setText(f"{fam} {sz}pt")
         layout.addRow("Font:", self._btn_font)
 
+        # Icon style
+        self._combo_icon_style = QComboBox()
+        for s in ["neon", "gradient", "dash", "filled"]:
+            self._combo_icon_style.addItem(s.capitalize(), s)
+        current_style = self._config.get("icon_style", "neon")
+        idx = self._combo_icon_style.findData(current_style)
+        if idx >= 0:
+            self._combo_icon_style.setCurrentIndex(idx)
+        layout.addRow("Icon style:", self._combo_icon_style)
+
         # FPS
         self._spin_fps = QSpinBox()
         self._spin_fps.setRange(10, 60)
+        self._combo_icon_style.setCurrentIndex(
+            self._combo_icon_style.findData(self._config.get("icon_style", "neon")))
         self._spin_fps.setValue(self._config["fps"])
         self._spin_fps.setSuffix(" fps")
         layout.addRow("Refresh rate:", self._spin_fps)
@@ -333,6 +345,8 @@ class SettingsDialog(QDialog):
         self._refresh_color_btn(self._btn_accent,     self._config["accent_color"])
         self._refresh_color_btn(self._btn_background, self._config["background_color"])
         self._refresh_color_btn(self._btn_selection,  self._config["selection_color"])
+        self._combo_icon_style.setCurrentIndex(
+            self._combo_icon_style.findData(self._config.get("icon_style", "neon")))
         self._spin_fps.setValue(self._config["fps"])
         self._spin_bars.setValue(self._config["bar_count"])
         self._spin_flux.setValue(self._config.get("flux_history", 2000))
@@ -351,6 +365,7 @@ class SettingsDialog(QDialog):
         if len(set(shortcuts.values())) != len(shortcuts):
             QMessageBox.warning(self, "Error", "Two actions share the same shortcut.")
             return
+        self._config["icon_style"]   = self._combo_icon_style.currentData()
         self._config["fps"]          = self._spin_fps.value()
         self._config["bar_count"]    = self._spin_bars.value()
         self._config["flux_history"] = self._spin_flux.value()

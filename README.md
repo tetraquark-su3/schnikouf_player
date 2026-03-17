@@ -38,6 +38,7 @@ quark_audio_player/
 │
 ├── ui/
 │   ├── main_window.py   # MainWindow — wires everything together
+│   ├── icon.py          # selectables styles: neon (glow), gradient (primary→accent fill), dash (dashed outline) and filled (filled outline); all adapt to theme colours automatically
 │   ├── playlist.py      # PlaylistWidget (O(1) duplicate check, custom sort header)
 │   ├── visualizations.py# 6 visualisation widgets
 │   ├── dialogs.py       # SettingsDialog, EqualizerDialog
@@ -126,6 +127,7 @@ Key settings:
 | `font_family` | `Cantarell` | UI font |
 | `font_size` | `13` | UI font size (px) |
 | `shortcuts` | see below | Configurable keyboard shortcuts |
+| `icon_style` | `neon` | Icon rendering style: `neon`, `gradient`, `dash` , `filled`|
 
 Default shortcuts:
 

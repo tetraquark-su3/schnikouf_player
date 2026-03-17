@@ -14,10 +14,10 @@ import random
 import numpy as np
 import vlc
 from PyQt6.QtCore    import QDir, QModelIndex, Qt, QTimer, QSize, QThread, pyqtSlot, pyqtSignal
-from PyQt6.QtGui     import QColor, QKeySequence, QPixmap, QShortcut, QIcon, QPainter, QFileSystemModel
+from PyQt6.QtGui     import QColor, QKeySequence, QPixmap, QShortcut, QIcon, QPainter, QFileSystemModel, QPen
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout,
-    QLabel, QMainWindow, QMessageBox, QSplitter, QTabWidget,
+    QLabel, QMainWindow, QMessageBox, QSplitter, QSplitterHandle, QTabWidget,
     QTextEdit, QTreeView, QVBoxLayout, QWidget, QPushButton, 
     QLineEdit
 )
@@ -36,6 +36,101 @@ from ui.visualizations import (
     SpectrogramWidget, SpectrumWidget, VUMeterWidget,
 )
 from ui.widgets       import ClickableSlider
+from ui.icons        import load_icon, render_no_art_pixmap, ICON_STYLES
+
+# ---------------------------------------------------------------------------
+# Styled splitter — wide handle with visible grip dots + hover highlight
+# ---------------------------------------------------------------------------
+
+class _StyledSplitterHandle(QSplitterHandle):
+    """
+    Custom splitter handle that draws three grip dots and highlights
+    with the application's primary colour on hover.
+    """
+    _HANDLE_WIDTH = 6   # pixels
+
+    def __init__(self, orientation, parent, primary_color: str = "#e94560",
+                 surface_color: str = "#2a2a44", dot_color: str = "#9098b0") -> None:
+        super().__init__(orientation, parent)
+        self._primary  = QColor(primary_color)
+        self._surface  = QColor(surface_color)
+        self._dot      = QColor(dot_color)
+        self._hovered  = False
+        self.setMouseTracking(True)
+
+    def update_colors(self, primary: str, surface: str, dot: str) -> None:
+        self._primary = QColor(primary)
+        self._surface = QColor(surface)
+        self._dot     = QColor(dot)
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Background
+        bg = self._primary if self._hovered else self._surface
+        painter.fillRect(0, 0, w, h, bg)
+
+        # Three grip dots centred on the handle
+        dot_color = QColor(255, 255, 255, 180) if self._hovered else self._dot
+        painter.setBrush(dot_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        r = 1.5
+        if self.orientation() == Qt.Orientation.Vertical:
+            # Dots arranged horizontally
+            cx, cy = w / 2, h / 2
+            for dx in (-5, 0, 5):
+                painter.drawEllipse(
+                    int(cx + dx - r), int(cy - r), int(r * 2), int(r * 2)
+                )
+        else:
+            # Dots arranged vertically
+            cx, cy = w / 2, h / 2
+            for dy in (-5, 0, 5):
+                painter.drawEllipse(
+                    int(cx - r), int(cy + dy - r), int(r * 2), int(r * 2)
+                )
+
+
+class _StyledSplitter(QSplitter):
+    """QSplitter that creates _StyledSplitterHandle instances."""
+
+    def __init__(self, orientation, primary: str = "#e94560",
+                 surface: str = "#2a2a44", dot: str = "#9098b0",
+                 parent=None) -> None:
+        super().__init__(orientation, parent)
+        self._primary = primary
+        self._surface = surface
+        self._dot     = dot
+        self.setHandleWidth(_StyledSplitterHandle._HANDLE_WIDTH)
+
+    def createHandle(self) -> _StyledSplitterHandle:
+        return _StyledSplitterHandle(
+            self.orientation(), self,
+            self._primary, self._surface, self._dot,
+        )
+
+    def update_colors(self, primary: str, surface: str, dot: str) -> None:
+        self._primary = primary
+        self._surface = surface
+        self._dot     = dot
+        for i in range(self.count() + 1):
+            h = self.handle(i)
+            if isinstance(h, _StyledSplitterHandle):
+                h.update_colors(primary, surface, dot)
+
 
 ICON_MAP = {
     "Settings": "icon_settings",
@@ -119,7 +214,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._vlc = vlc.Instance("--reset-plugins-cache")
-        self.setWindowTitle("Quark Audio Player v0.5")
+        self.setWindowTitle("Quark Audio Player v0.6")
         app_icon_path = os.path.join(ASSETS_DIR, "icon_app.png")
         if os.path.exists(app_icon_path):
             self.setWindowIcon(QIcon(app_icon_path))
@@ -132,6 +227,7 @@ class MainWindow(QMainWindow):
         self._current_item  = None           # QTreeWidgetItem | None
         self._shuffle       = False
         self._repeat        = False
+        self._shuffle_order: list[int] = []   # fixed random order, generated once
         self._shortcuts: dict[str, QShortcut] = {}
 
         # VLC — MediaPlayer handles EQ/volume; MediaListPlayer handles transitions
@@ -307,16 +403,19 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(content_tabs)
 
         # ── Splitters ────────────────────────────────────────────────
-        h_splitter = QSplitter(Qt.Orientation.Horizontal)
+        h_splitter = _StyledSplitter(Qt.Orientation.Horizontal)
         h_splitter.addWidget(left_panel)
         h_splitter.addWidget(right_panel)
         h_splitter.setSizes([400, 700])
 
-        v_splitter = QSplitter(Qt.Orientation.Vertical)
+        v_splitter = _StyledSplitter(Qt.Orientation.Vertical)
         v_splitter.addWidget(self._viz_tabs)
         v_splitter.addWidget(h_splitter)
         v_splitter.setSizes([150, 500])
         layout.addWidget(v_splitter)
+
+        self._h_splitter = h_splitter
+        self._v_splitter = v_splitter
 
         # ── Control bar ──────────────────────────────────────────────
         control_bar = QWidget()
@@ -451,42 +550,33 @@ class MainWindow(QMainWindow):
         """Retint all button icons to match the current background."""
         for label, btn in self._icon_buttons.items():
             icon_name = ICON_MAP.get(label, "")
-            icon_path = os.path.join(ASSETS_DIR, f"{icon_name}.png")
-            if os.path.exists(icon_path):
+            if icon_name:
                 btn.setIcon(self._load_icon(icon_name))
         # play button may currently show pause icon
         self._set_play_icon(self._player.is_playing())
         # mute button may currently show muted icon
         if self._btn_mute.isChecked():
             self._btn_mute.setIcon(self._load_icon(ICON_MAP["Muted"]))
+        # shuffle/repeat: accent-swapped icon when active
+        self._set_toggle_icon(self._btn_shuffle, "icon_shuffle", self._shuffle)
+        self._set_toggle_icon(self._btn_repeat,  "icon_repeat",  self._repeat)
 
     # ------------------------------------------------------------------
     # Button factory
     # ------------------------------------------------------------------
 
-    def _load_icon(self, name: str) -> QIcon:
-        """Load an icon and tint it to contrast with the current background."""
-        path = os.path.join(ASSETS_DIR, f"{name}.png")
-        if not os.path.exists(path):
-            return QIcon()
-        
-        px = QPixmap(path)
-        
-        # Determine if background is dark or light
-        bg = QColor(self._config["background_color"])
-        luminance = 0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()
-        tint = QColor("#1a1a2e") if luminance > 128 else QColor("#ffffff")
-        
-        # Apply tint via painter composition
-        tinted = QPixmap(px.size())
-        tinted.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(tinted)
-        painter.drawPixmap(0, 0, px)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        painter.fillRect(tinted.rect(), tint)
-        painter.end()
-        
-        return QIcon(tinted)
+    def _load_icon(self, name: str, override_primary: str = "", override_accent: str = "") -> QIcon:
+        """Generate a themed SVG icon, with PNG fallback.
+        override_primary/accent allow swapping colours for active toggle states.
+        """
+        return load_icon(
+            name  = name,
+            style = self._config.get("icon_style", "neon"),
+            primary = override_primary or self._config["primary_color"],
+            accent  = override_accent  or self._config["accent_color"],
+            pixel_size = 32,
+            assets_dir = ASSETS_DIR,
+        )
 
     def _ctrl_btn(self, label, slot, checkable=False):
         btn = QPushButton()
@@ -529,14 +619,27 @@ class MainWindow(QMainWindow):
         self._spectrogram.set_frames_per_bin(self._config.get("spectrogram_resolution", 15))
         cp = self._config["primary_color"]
         ca = self._config["accent_color"]
+        cf = self._config["background_color"]
         for w in [self._spectrum, self._oscilloscope, self._lissajous,
                 self._flux, self._vumeter]:
             w.set_colors(cp, ca)
         self.setStyleSheet(build_stylesheet(self._config))
         self._playlist.set_accent_color(self._config["accent_color"])
+        # Update splitter handle colours to match the new theme
+        from config.settings import derive_color
+        _dark = (sum(int(cf.lstrip("#")[i*2:i*2+2], 16) for i in range(3)) / 3) < 128
+        _step = 1 if _dark else -1
+        s2  = derive_color(cf, 16 * _step)
+        dot = "#9098b0" if _dark else "#7070a0"
+        if hasattr(self, "_h_splitter"):
+            self._h_splitter.update_colors(cp, s2, dot)
+            self._v_splitter.update_colors(cp, s2, dot)
         # guard: _icon_buttons doesn't exist yet on first call from __init__
         if hasattr(self, "_icon_buttons"):
             self._refresh_icons()
+        # Re-render the vinyl placeholder with the new style/colors
+        if hasattr(self, "_album_art") and self._full_art_pixmap is None:
+            self._show_no_art()
 
     def _apply_shortcuts(self) -> None:
         for sc in self._shortcuts.values():
@@ -649,7 +752,7 @@ class MainWindow(QMainWindow):
         if play_when_ready and not self._player.is_playing():
             self._pending_play = path
         self._meta_worker.enqueue(path)
-
+        
     @pyqtSlot(str, dict)
     def _on_track_ready(self, path: str, meta: dict) -> None:
         """Called by _MetadataWorker when metadata for a path is ready."""
@@ -669,8 +772,12 @@ class MainWindow(QMainWindow):
             item = self._playlist.item_by_path(path)
             if item is not None:
                 self._play_item(item)
-
-    # ------------------------------------------------------------------
+        elif self._current_track is not None:
+            # A track was added while playback is active: refresh the VLC
+            # media list so the new track is reachable without interrupting
+            # the currently playing one.
+            self._rebuild_media_list(from_row=self._current_track, reshuffle=False)
+        # ------------------------------------------------------------------
     # Drag-and-drop
     # ------------------------------------------------------------------
 
@@ -842,28 +949,14 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _show_no_art(self) -> None:
-        no_art_path = os.path.join(ASSETS_DIR, "icon_no_art.png")
-        if os.path.exists(no_art_path):
-            px = QPixmap(no_art_path)
-            if not px.isNull():
-                # Convert black background to transparent
-                img = px.toImage()
-                img = img.convertToFormat(img.Format.Format_ARGB32)
-                for y in range(img.height()):
-                    for x in range(img.width()):
-                        color = QColor(img.pixel(x, y))
-                        # If the pixel is dark enough, make it transparent
-                        if color.red() < 30 and color.green() < 30 and color.blue() < 30:
-                            img.setPixel(x, y, 0x00000000)
-                px = QPixmap.fromImage(img)
-                px = px.scaled(150, 150,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation)
-                self._album_art.setPixmap(px)
-                self._album_art.setText("")
-                return
-        self._album_art.setPixmap(QPixmap())
-        self._album_art.setText("[no art]")
+        px = render_no_art_pixmap(
+            style   = self._config.get("icon_style", "neon"),
+            primary = self._config["primary_color"],
+            accent  = self._config["accent_color"],
+            size    = 150,
+        )
+        self._album_art.setPixmap(px)
+        self._album_art.setText("")
 
     # ------------------------------------------------------------------
     # Playback
@@ -890,10 +983,9 @@ class MainWindow(QMainWindow):
             return
 
         row = self._playlist.indexOfTopLevelItem(item)
-
+        self._rebuild_media_list(from_row=row, reshuffle=True)
         # Rebuild the MediaList starting from this track so VLC can
         # chain automatically into the next ones.
-        self._rebuild_media_list(from_row=row)
 
         # Play the first item in the freshly built list (= our target track)
         self._list_player.stop()
@@ -910,19 +1002,30 @@ class MainWindow(QMainWindow):
         self._timer_fft.start()
         self._loader.load(path)
 
-    def _rebuild_media_list(self, from_row: int = 0) -> None:
+    def _rebuild_media_list(self, from_row: int = 0, reshuffle: bool = False) -> None:
         """
         Rebuild self._media_list from the playlist starting at from_row.
-        If shuffle is on, the remaining rows are appended in random order.
+        In shuffle mode, uses a stable pre-generated order (_shuffle_order)
+        so each track plays exactly once.  Pass reshuffle=True to force a
+        new random order (e.g. when shuffle is toggled on, or a new track
+        is manually selected).
         """
         ml = self._vlc.media_list_new()
         n  = self._playlist.topLevelItemCount()
 
         if self._shuffle and from_row < n:
-            # Current track first, then the rest in random order
-            rest = list(range(from_row + 1, n))
-            random.shuffle(rest)
-            rows = [from_row] + rest
+            # Generate a new order only when explicitly requested or the
+            # stored order is stale (wrong size or doesn't contain from_row).
+            if (reshuffle
+                    or len(self._shuffle_order) != n
+                    or from_row not in self._shuffle_order):
+                rest = [r for r in range(n) if r != from_row]
+                random.shuffle(rest)
+                self._shuffle_order = [from_row] + rest
+
+            # Slice the order so it starts at from_row's position
+            start_idx = self._shuffle_order.index(from_row)
+            rows = self._shuffle_order[start_idx:]
         else:
             rows = list(range(from_row, n))
 
@@ -975,6 +1078,20 @@ class MainWindow(QMainWindow):
         Called (via signal) when VLC's MediaListPlayer moves to the next item.
         We advance _current_track and refresh the UI.
         """
+        # In repeat mode VLC fires this signal when looping the same track.
+        # The timers are still running and audio is fine — just refresh the UI
+        # for the same track and restart the sample loader.
+        if self._repeat:
+            if self._current_item is not None:
+                path = self._playlist.path_of(self._current_item)
+                self._update_ui_for_track(path)
+                self._apply_eq()
+                self._loader.load(path)
+                # Make sure timers are running (they may have been stopped)
+                self._timer_progress.start()
+                self._timer_fft.start()
+            return
+
         # Find which index in the media list VLC is now playing
         # by incrementing our pointer into _media_list_rows.
         rows = getattr(self, "_media_list_rows", [])
@@ -989,14 +1106,21 @@ class MainWindow(QMainWindow):
             idx_in_list = 1
 
         if idx_in_list >= len(rows):
-            # End of list — stop timers, reset UI
-            self._timer_progress.stop()
-            self._timer_fft.stop()
-            self._set_play_icon(False)
-            self._progress.setValue(0)
-            self._time_label.setText("0:00 / 0:00")
-            self.statusBar().showMessage("End of playlist.")
-            return
+                    # Check if tracks were added since the list was built
+                    next_row = (rows[-1] + 1) if rows else 0
+                    if next_row < self._playlist.topLevelItemCount():
+                        # New tracks exist — rebuild from there and continue
+                        self._rebuild_media_list(from_row=next_row)
+                        self._list_player.play()
+                    else:
+                        # Genuinely end of playlist — stop timers, reset UI
+                        self._timer_progress.stop()
+                        self._timer_fft.stop()
+                        self._set_play_icon(False)
+                        self._progress.setValue(0)
+                        self._time_label.setText("0:00 / 0:00")
+                        self.statusBar().showMessage("End of playlist.")
+                    return
 
         new_row  = rows[idx_in_list]
         new_item = self._playlist.item_at_row(new_row)
@@ -1053,12 +1177,22 @@ class MainWindow(QMainWindow):
             else:
                 self._btn_mute.setText("Volume")
 
+    def _reset_visualizations(self) -> None:
+        """Reset all visualisation widgets to their blank/idle state."""
+        self._spectrum.reset()
+        self._spectrogram.reset()
+        self._oscilloscope.reset()
+        self._lissajous.reset()
+        self._flux.reset()
+        self._vumeter.reset()
+
     def _stop(self) -> None:
         self._list_player.stop()
         self._set_play_icon(False)
         self._progress.setValue(0)
         self._timer_progress.stop()
         self._timer_fft.stop()
+        self._reset_visualizations()
         self.statusBar().showMessage("Stopped.")
 
     def _next_track(self) -> None:
@@ -1066,10 +1200,6 @@ class MainWindow(QMainWindow):
             return
         if self._repeat:
             self._play_item(self._playlist.item_at_row(self._current_track))
-            return
-        if self._shuffle:
-            self._rebuild_media_list(from_row=self._current_track)
-            self._list_player.next()
             return
         result = self._list_player.next()
         if result == -1:
@@ -1079,6 +1209,7 @@ class MainWindow(QMainWindow):
             self._set_play_icon(False)
             self._progress.setValue(0)
             self._time_label.setText("0:00 / 0:00")
+            self._reset_visualizations()
             self.statusBar().showMessage("End of playlist.")
 
     def _prev_track(self) -> None:
@@ -1089,13 +1220,28 @@ class MainWindow(QMainWindow):
             return
         self._play_item(self._playlist.item_at_row(self._current_track - 1))
 
+    def _set_toggle_icon(self, btn, icon_name: str, active: bool) -> None:
+        """Regenerate a toggle button icon with swapped colours when active."""
+        if active:
+            icon = self._load_icon(icon_name,
+                                   override_primary=self._config["accent_color"],
+                                   override_accent=self._config["primary_color"])
+        else:
+            icon = self._load_icon(icon_name)
+        btn.setIcon(icon)
+        btn.setIconSize(QSize(22, 22))
+
     def _toggle_shuffle(self) -> None:
         self._shuffle = self._btn_shuffle.isChecked()
+        self._set_toggle_icon(self._btn_shuffle, "icon_shuffle", self._shuffle)
+        if not self._shuffle:
+            self._shuffle_order = []   # clear stale order
         if self._current_track is not None:
-            self._rebuild_media_list(from_row=self._current_track)
+            self._rebuild_media_list(from_row=self._current_track, reshuffle=True)
 
     def _toggle_repeat(self) -> None:
         self._repeat = self._btn_repeat.isChecked()
+        self._set_toggle_icon(self._btn_repeat, "icon_repeat", self._repeat)
         mode = vlc.PlaybackMode.repeat if self._repeat else vlc.PlaybackMode.default
         self._list_player.set_playback_mode(mode)
 
@@ -1114,6 +1260,7 @@ class MainWindow(QMainWindow):
             self._set_play_icon(False)
             self._progress.setValue(0)
             self._time_label.setText("0:00 / 0:00")
+            self._reset_visualizations()
             self.statusBar().showMessage("End of playlist.")
             return
         total = self._player.get_length()
@@ -1183,6 +1330,7 @@ class MainWindow(QMainWindow):
         self._set_play_icon(False)
         self._timer_progress.stop()
         self._timer_fft.stop()
+        self._reset_visualizations()
 
     # ------------------------------------------------------------------
     # Keyboard events
